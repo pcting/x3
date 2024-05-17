@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,11 +11,11 @@ import (
 	"strings"
 
 	"github.com/jawher/mow.cli"
+	"github.com/joshuarubin/go-sway"
 	"github.com/op/go-logging"
-	"github.com/proxypoke/i3ipc"
 )
 
-var log = logging.MustGetLogger("x3")
+var log = logging.MustGetLogger("xsway")
 
 var ErrWorkspaceNotFound = errors.New("No workspace found")
 var ErrArgParseFailed = errors.New("Failed to parse args")
@@ -66,16 +67,18 @@ func getStdin(cliArgs []string) []string {
 }
 
 func main() {
-	x3 := cli.App("x3", "XMonad workspace handling and more for i3-wm")
-	x3.Version("v version", "0.1")
+	xsway := cli.App("xsway", "XMonad workspace handling and more for sway-wm")
+	xsway.Version("v version", "0.1")
 
-	debug := x3.Bool(cli.BoolOpt{
+	ctx := context.Background()
+
+	debug := xsway.Bool(cli.BoolOpt{
 		Name:  "debug",
 		Value: false,
 		Desc:  "Enable debug logs",
 	})
 
-	x3.Before = func() {
+	xsway.Before = func() {
 		if *debug {
 			backend := logging.NewLogBackend(os.Stderr, "", 0)
 			backendLevel := logging.AddModuleLevel(backend)
@@ -84,81 +87,82 @@ func main() {
 		}
 	}
 
-	x3.Command("show", "Show or create workspace on focused screen", func(cmd *cli.Cmd) {
+	xsway.Command("show", "Show or create workspace on focused screen", func(cmd *cli.Cmd) {
 		wsName := cmd.StringArg("WSNAME", "", "Workspace name")
 
 		cmd.Action = func() {
-			Show(*wsName)
+			Show(ctx, *wsName)
 		}
 	})
 
-	x3.Command("rename", "Rename current workspace", func(cmd *cli.Cmd) {
+	xsway.Command("rename", "Rename current workspace", func(cmd *cli.Cmd) {
 		wsName := cmd.StringArg("WSNAME", "", "New workspace name")
 
 		cmd.Action = func() {
-			Rename(*wsName)
+			Rename(ctx, *wsName)
 		}
 	})
 
-	x3.Command("bind", "Bind current workspace to num", func(cmd *cli.Cmd) {
+	xsway.Command("bind", "Bind current workspace to num", func(cmd *cli.Cmd) {
 		num := cmd.StringArg("NUM", "", "")
 
 		cmd.Action = func() {
-			Bind(*num)
+			Bind(ctx, *num)
 		}
 	})
 
-	x3.Command("swap", "Swap visible workspaces when there is 2 screens", func(cmd *cli.Cmd) {
+	xsway.Command("swap", "Swap visible workspaces when there is 2 screens", func(cmd *cli.Cmd) {
 		cmd.Action = func() {
-			Swap()
+			Swap(ctx)
 		}
 	})
 
-	x3.Command("list", "List all workspace names", func(cmd *cli.Cmd) {
+	xsway.Command("list", "List all workspace names", func(cmd *cli.Cmd) {
 		cmd.Action = func() {
-			List()
+			List(ctx)
 		}
 	})
 
-	x3.Command("current", "Current workspace name", func(cmd *cli.Cmd) {
+	xsway.Command("current", "Current workspace name", func(cmd *cli.Cmd) {
 		cmd.Action = func() {
-			Current()
+			Current(ctx)
 		}
 	})
 
-	x3.Command("move", "Move current container to workspace", func(cmd *cli.Cmd) {
+	xsway.Command("move", "Move current container to workspace", func(cmd *cli.Cmd) {
 		ws := cmd.StringArg("NUM_OR_NAME", "", "")
 
 		cmd.Action = func() {
-			Move(*ws)
+			Move(ctx, *ws)
 		}
 	})
 
-	x3.Command("merge", "Merge current container into other container", func(cmd *cli.Cmd) {
+	xsway.Command("merge", "Merge current container into other container", func(cmd *cli.Cmd) {
 		d := cmd.StringArg("DIRECTION", "", "The direction where to merge (left/right/up/down)")
 		o := cmd.StringArg("ORIENTATION", "", "Split mode (horizontal/vertical)")
 		l := cmd.StringArg("LAYOUT", "", "Layout type to use (default/tabbed/stacking)")
 
 		cmd.Action = func() {
-			Merge(Direction(*d), Orientation(*o), Layout(*l))
+			Merge(ctx, Direction(*d), Orientation(*o), Layout(*l))
 		}
 	})
 
 	args := getStdin(os.Args)
-	x3.Run(args)
+	xsway.Run(args)
 }
 
-type I3WS []i3ipc.Workspace
+// WS represents the set of shared workspaces
+type WS []sway.Workspace
 
-func (ws I3WS) Len() int {
+func (ws WS) Len() int {
 	return len(ws)
 }
 
-func (ws I3WS) Swap(i, j int) {
+func (ws WS) Swap(i, j int) {
 	ws[i], ws[j] = ws[j], ws[i]
 }
 
-func (ws I3WS) Less(i, j int) bool {
+func (ws WS) Less(i, j int) bool {
 	if ws[i].Num != -1 {
 		return ws[i].Num < ws[j].Num
 	} else {
@@ -166,73 +170,73 @@ func (ws I3WS) Less(i, j int) bool {
 	}
 }
 
-type I3 struct {
-	s          *i3ipc.IPCSocket
-	workspaces []i3ipc.Workspace
-	chain      *I3CmdChain
+type XSway struct {
+	client     sway.Client
+	workspaces []sway.Workspace
+	chain      *CmdChain
 }
 
-func (i3 *I3) RunChain() {
-	cmd := strings.Join(*i3.chain, ";")
+func (c *XSway) RunChain(ctx context.Context) {
+	cmd := strings.Join(*c.chain, ";")
 	log.Debugf("Run: %s", cmd)
-	i3.s.Command(cmd)
+	c.client.RunCommand(ctx, cmd)
 }
 
-func (i3 *I3) GetWSNum(num int32) (i3ipc.Workspace, error) {
-	for _, ws := range i3.workspaces {
+func (c *XSway) GetWSNum(ctx context.Context, num int64) (sway.Workspace, error) {
+	for _, ws := range c.workspaces {
 		if ws.Num == num {
 			return ws, nil
 		}
 	}
-	return i3ipc.Workspace{}, ErrWorkspaceNotFound
+	return sway.Workspace{}, ErrWorkspaceNotFound
 }
 
-func (i3 *I3) GetWSName(name string) (i3ipc.Workspace, error) {
-	for _, ws := range i3.workspaces {
+func (c *XSway) GetWSName(ctx context.Context, name string) (sway.Workspace, error) {
+	for _, ws := range c.workspaces {
 		if strings.Contains(ws.Name, name) {
 			return ws, nil
 		}
 	}
-	return i3ipc.Workspace{}, ErrWorkspaceNotFound
+	return sway.Workspace{}, ErrWorkspaceNotFound
 }
 
-func (i3 *I3) GetWS(nameOrNum string) (i3ipc.Workspace, error) {
-	var ws i3ipc.Workspace
+func (c *XSway) GetWS(ctx context.Context, nameOrNum string) (sway.Workspace, error) {
+	var ws sway.Workspace
 	num, err := strconv.ParseInt(nameOrNum, 10, 32)
 	if err != nil {
-		ws, err = i3.GetWSName(nameOrNum)
+		ws, err = c.GetWSName(ctx, nameOrNum)
 	} else {
-		ws, err = i3.GetWSNum(int32(num))
+		ws, err = c.GetWSNum(ctx, num)
 	}
 
 	if err != nil {
-		return i3ipc.Workspace{}, err
+		return sway.Workspace{}, err
 	}
 
 	return ws, nil
 }
 
-func (i3 *I3) CurrentWS() (i3ipc.Workspace, error) {
-	for _, ws := range i3.workspaces {
+func (c *XSway) CurrentWS() (sway.Workspace, error) {
+	for _, ws := range c.workspaces {
 		if ws.Focused == true {
 			return ws, nil
 		}
 	}
-	return i3ipc.Workspace{}, ErrWorkspaceNotFound
+	return sway.Workspace{}, ErrWorkspaceNotFound
 }
 
-func (i3 *I3) OutputWS(output string) (i3ipc.Workspace, error) {
-	for _, ws := range i3.workspaces {
+func (c *XSway) OutputWS(ctx context.Context, output string) (sway.Workspace, error) {
+	for _, ws := range c.workspaces {
 		if ws.Visible && ws.Output == output {
 			return ws, nil
 		}
 	}
-	return i3ipc.Workspace{}, ErrWorkspaceNotFound
+	return sway.Workspace{}, ErrWorkspaceNotFound
 }
 
-func (i3 *I3) ActiveOutputs() ([]i3ipc.Output, error) {
-	var active []i3ipc.Output
-	outputs, err := i3.s.GetOutputs()
+func (c *XSway) ActiveOutputs(ctx context.Context) ([]sway.Output, error) {
+	var active []sway.Output
+	outputs, err := c.client.GetOutputs(ctx)
 	if err == nil {
 		for _, o := range outputs {
 			if o.Active {
@@ -243,64 +247,64 @@ func (i3 *I3) ActiveOutputs() ([]i3ipc.Output, error) {
 	return active, err
 }
 
-type I3CmdChain []string
+type CmdChain []string
 
-func (c *I3CmdChain) Add(cmd string) {
+func (c *CmdChain) Add(cmd string) {
 	log.Debugf("Add cmd: %s", cmd)
 	*c = append(*c, cmd)
 }
 
-func (c *I3CmdChain) ShowWS(ws i3ipc.Workspace) {
+func (c *CmdChain) ShowWS(ws sway.Workspace) {
 	c.Add("workspace " + string(ws.Name))
 }
 
-func (c *I3CmdChain) RenameWS(wsName string) {
+func (c *CmdChain) RenameWS(wsName string) {
 	c.Add("rename workspace to " + wsName)
 }
 
-func (c *I3CmdChain) MoveWSToOuput(output string) {
+func (c *CmdChain) MoveWSToOuput(output string) {
 	c.Add("move workspace to output " + output)
 }
 
-func (c *I3CmdChain) FocusOutput(output string) {
+func (c *CmdChain) FocusOutput(output string) {
 	c.Add("focus output " + output)
 }
 
-func (c *I3CmdChain) SwapWS(ws1 i3ipc.Workspace, ws2 i3ipc.Workspace) {
+func (c *CmdChain) SwapWS(ws1 sway.Workspace, ws2 sway.Workspace) {
 	c.MoveWSToOuput(ws2.Output)
 	c.ShowWS(ws2)
 	c.MoveWSToOuput(ws1.Output)
 	c.FocusOutput(ws1.Output)
 }
 
-func (c *I3CmdChain) ShowWSOnOutput(ws i3ipc.Workspace, output string) {
+func (c *CmdChain) ShowWSOnOutput(ws sway.Workspace, output string) {
 	c.ShowWS(ws)
 	if ws.Output != output {
 		c.MoveWSToOuput(output)
 	}
 }
 
-func (c *I3CmdChain) MoveContainerToWS(wsName string) {
+func (c *CmdChain) MoveContainerToWS(wsName string) {
 	c.Add("move container to workspace " + wsName)
 }
 
-func (c *I3CmdChain) FocusContainer(d Direction) {
+func (c *CmdChain) FocusContainer(d Direction) {
 	c.Add(fmt.Sprintf("focus %s", d))
 }
 
-func (c *I3CmdChain) SplitContainer(o Orientation) {
+func (c *CmdChain) SplitContainer(o Orientation) {
 	c.Add(fmt.Sprintf("split %s", o))
 }
 
-func (c *I3CmdChain) MoveContainer(d Direction) {
+func (c *CmdChain) MoveContainer(d Direction) {
 	c.Add(fmt.Sprintf("move %s", d))
 }
 
-func (c *I3CmdChain) ChangeLayout(l Layout) {
+func (c *CmdChain) ChangeLayout(l Layout) {
 	c.Add(fmt.Sprintf("layout %s", l))
 }
 
-func WSName(ws i3ipc.Workspace) string {
+func WSName(ws sway.Workspace) string {
 	var name string
 	splitName := strings.Split(ws.Name, ":")
 	if len(splitName) > 1 {
@@ -311,140 +315,140 @@ func WSName(ws i3ipc.Workspace) string {
 	return name
 }
 
-func Init() I3 {
-	socket, _ := i3ipc.GetIPCSocket()
-	workspaces, _ := socket.GetWorkspaces()
-	chain := I3CmdChain{}
-	return I3{s: socket, workspaces: workspaces, chain: &chain}
+func Init(ctx context.Context) XSway {
+	client, _ := sway.New(ctx)
+	workspaces, _ := client.GetWorkspaces(ctx)
+	chain := CmdChain{}
+	return XSway{client: client, workspaces: workspaces, chain: &chain}
 }
 
-func Show(wsName string) {
-	i3 := Init()
+func Show(ctx context.Context, wsName string) {
+	c := Init(ctx)
 
-	targetWS, err := i3.GetWS(wsName)
+	targetWS, err := c.GetWS(ctx, wsName)
 	if err != nil {
-		i3.chain.ShowWS(i3ipc.Workspace{Name: wsName})
-		i3.RunChain()
+		c.chain.ShowWS(sway.Workspace{Name: wsName})
+		c.RunChain(ctx)
 		return
 	}
 
-	currentWS, _ := i3.CurrentWS()
+	currentWS, _ := c.CurrentWS()
 	if currentWS == targetWS {
 		return
 	}
 
 	if currentWS.Visible && targetWS.Visible {
-		i3.chain.SwapWS(currentWS, targetWS)
+		c.chain.SwapWS(currentWS, targetWS)
 	} else {
 		// bring workspace to output
-		i3.chain.ShowWSOnOutput(targetWS, currentWS.Output)
+		c.chain.ShowWSOnOutput(targetWS, currentWS.Output)
 		// make WS history correct
-		i3.chain.ShowWS(currentWS)
-		i3.chain.ShowWS(targetWS)
+		c.chain.ShowWS(currentWS)
+		c.chain.ShowWS(targetWS)
 	}
-	i3.chain.FocusOutput(currentWS.Output)
-	i3.RunChain()
+	c.chain.FocusOutput(currentWS.Output)
+	c.RunChain(ctx)
 }
 
-func Swap() {
-	i3 := Init()
-	outputs, _ := i3.ActiveOutputs()
+func Swap(ctx context.Context) {
+	c := Init(ctx)
+	outputs, _ := c.ActiveOutputs(ctx)
 	if len(outputs) != 2 {
 		return
 	}
-	ws1, _ := i3.GetWS(outputs[0].Current_Workspace)
-	ws2, _ := i3.GetWS(outputs[1].Current_Workspace)
+	ws1, _ := c.GetWS(ctx, outputs[0].CurrentWorkspace)
+	ws2, _ := c.GetWS(ctx, outputs[1].CurrentWorkspace)
 	if ws1.Focused {
-		i3.chain.SwapWS(ws1, ws2)
+		c.chain.SwapWS(ws1, ws2)
 	} else {
-		i3.chain.SwapWS(ws2, ws1)
+		c.chain.SwapWS(ws2, ws1)
 	}
-	i3.RunChain()
+	c.RunChain(ctx)
 }
 
-func List() {
-	i3 := Init()
-	names := make([]string, len(i3.workspaces))
-	sort.Sort(I3WS(i3.workspaces))
-	for i, ws := range i3.workspaces {
+func List(ctx context.Context) {
+	c := Init(ctx)
+	names := make([]string, len(c.workspaces))
+	sort.Sort(WS(c.workspaces))
+	for i, ws := range c.workspaces {
 		names[i] = ws.Name
 	}
 	fmt.Printf(strings.Join(names, "\n"))
 }
 
-func Current() {
-	i3 := Init()
-	ws, _ := i3.CurrentWS()
+func Current(ctx context.Context) {
+	c := Init(ctx)
+	ws, _ := c.CurrentWS()
 	fmt.Printf(WSName(ws))
 }
 
-func Rename(wsName string) {
-	i3 := Init()
+func Rename(ctx context.Context, wsName string) {
+	c := Init(ctx)
 
-	ws, _ := i3.CurrentWS()
+	ws, _ := c.CurrentWS()
 	if ws.Num != -1 {
 		wsName = strconv.Itoa(int(ws.Num)) + ":" + wsName
 	}
 
-	i3.chain.RenameWS(wsName)
-	i3.RunChain()
+	c.chain.RenameWS(wsName)
+	c.RunChain(ctx)
 }
 
-func Bind(wsNum string) {
-	i3 := Init()
+func Bind(ctx context.Context, wsNum string) {
+	c := Init(ctx)
 
-	currentWS, _ := i3.CurrentWS()
+	currentWS, _ := c.CurrentWS()
 	currentName := WSName(currentWS)
 	currentNum := strconv.Itoa(int(currentWS.Num))
 	if currentNum == wsNum {
 		return
 	}
 
-	otherWS, err := i3.GetWS(wsNum)
+	otherWS, err := c.GetWS(ctx, wsNum)
 	if err == nil {
 		otherName := WSName(otherWS)
-		i3.chain.ShowWS(otherWS)
+		c.chain.ShowWS(otherWS)
 		// num to bind for the other WS
 		if currentNum != "-1" {
-			i3.chain.RenameWS(currentNum + ":" + otherName)
+			c.chain.RenameWS(currentNum + ":" + otherName)
 		} else {
-			i3.chain.RenameWS(otherName)
+			c.chain.RenameWS(otherName)
 		}
 		// restore other output WS if needed
 		if otherWS.Output != currentWS.Output {
-			otherOutputWS, err := i3.OutputWS(otherWS.Output)
+			otherOutputWS, err := c.OutputWS(ctx, otherWS.Output)
 			if err == nil && otherOutputWS != otherWS {
-				i3.chain.ShowWS(otherOutputWS)
+				c.chain.ShowWS(otherOutputWS)
 			}
 		}
-		i3.chain.ShowWS(currentWS)
+		c.chain.ShowWS(currentWS)
 	} else {
 		fmt.Printf("%s\n", err)
 	}
 
-	i3.chain.RenameWS(wsNum + ":" + currentName)
-	i3.chain.FocusOutput(currentWS.Output)
-	i3.RunChain()
+	c.chain.RenameWS(wsNum + ":" + currentName)
+	c.chain.FocusOutput(currentWS.Output)
+	c.RunChain(ctx)
 }
 
-func Move(wsName string) {
-	i3 := Init()
-	ws, err := i3.GetWS(wsName)
+func Move(ctx context.Context, wsName string) {
+	c := Init(ctx)
+	ws, err := c.GetWS(ctx, wsName)
 	// new workspace
 	if err != nil {
-		i3.chain.MoveContainerToWS(wsName)
+		c.chain.MoveContainerToWS(wsName)
 	} else {
-		i3.chain.MoveContainerToWS(ws.Name)
+		c.chain.MoveContainerToWS(ws.Name)
 	}
-	i3.RunChain()
+	c.RunChain(ctx)
 }
 
-func Merge(d Direction, o Orientation, l Layout) {
-	i3 := Init()
-	i3.chain.FocusContainer(d)
-	i3.chain.SplitContainer(o)
-	i3.chain.FocusContainer(inverse(d))
-	i3.chain.MoveContainer(d)
-	i3.chain.ChangeLayout(l)
-	i3.RunChain()
+func Merge(ctx context.Context, d Direction, o Orientation, l Layout) {
+	c := Init(ctx)
+	c.chain.FocusContainer(d)
+	c.chain.SplitContainer(o)
+	c.chain.FocusContainer(inverse(d))
+	c.chain.MoveContainer(d)
+	c.chain.ChangeLayout(l)
+	c.RunChain(ctx)
 }
