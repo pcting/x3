@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,6 +88,14 @@ func main() {
 			logging.SetBackend(backend)
 		}
 	}
+
+	xsway.Command("focus-output-horizontal-position", "Change focusd output by horizontal position", func(cmd *cli.Cmd) {
+		position := cmd.StringArg("POSITION", "", "Position name")
+
+		cmd.Action = func() {
+			FocusOutputHorizontalPosition(ctx, *position)
+		}
+	})
 
 	xsway.Command("show", "Show or create workspace on focused screen", func(cmd *cli.Cmd) {
 		wsName := cmd.StringArg("WSNAME", "", "Workspace name")
@@ -173,6 +183,7 @@ func (ws WS) Less(i, j int) bool {
 type XSway struct {
 	client     sway.Client
 	workspaces []sway.Workspace
+	outputs    []sway.Output
 	chain      *CmdChain
 }
 
@@ -318,8 +329,31 @@ func WSName(ws sway.Workspace) string {
 func Init(ctx context.Context) XSway {
 	client, _ := sway.New(ctx)
 	workspaces, _ := client.GetWorkspaces(ctx)
+	outputs, _ := client.GetOutputs(ctx)
 	chain := CmdChain{}
-	return XSway{client: client, workspaces: workspaces, chain: &chain}
+	return XSway{
+		client:     client,
+		workspaces: workspaces,
+		outputs:    outputs,
+		chain:      &chain,
+	}
+}
+
+func FocusOutputHorizontalPosition(ctx context.Context, position string) {
+	c := Init(ctx)
+	intPos, err := strconv.ParseInt(position, 10, 64)
+	if err != nil {
+		return
+	}
+	if len(c.outputs) <= int(intPos) {
+		return
+	}
+	lenCmp := func(a, b sway.Output) int {
+        return cmp.Compare(a.Rect.X, b.Rect.X)
+    }
+	slices.SortFunc(c.outputs, lenCmp)
+	c.chain.FocusOutput(c.outputs[intPos].Name)
+	c.RunChain(ctx)
 }
 
 func Show(ctx context.Context, wsName string) {
